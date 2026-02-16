@@ -46,7 +46,9 @@ class Config:
     shared_attention_norm: bool = False
     _norm_class: Literal["LayerNorm", "RMSNorm"] = "LayerNorm"
     norm_eps: float = 1e-5
-    _mlp_class: Literal["GptNeoxMLP", "LLaMAMLP"] = "GptNeoxMLP"
+    _mlp_class: Literal["GptNeoxMLP", "LLaMAMLP", "GeluMLP", "SiluMLP", "ReluMLP", "SwiGLUMLP", "GeGLUMLP", "ReGLUMLP"] = "GptNeoxMLP"
+    _pos_encoding: str = "rope"  # rope, none
+    rope_base: int = 10000
     intermediate_size: Optional[int] = None
     condense_ratio: int = 1
 
@@ -63,8 +65,12 @@ class Config:
             self.n_query_groups = self.n_head
         # compute the intermediate size for MLP if not set
         if self.intermediate_size is None:
-            if self._mlp_class == "LLaMAMLP":
-                raise ValueError("The config needs to set the `intermediate_size`")
+            # GLU-based MLPs require explicit intermediate_size
+            glu_mlp_classes = {"LLaMAMLP", "SwiGLUMLP", "GeGLUMLP", "ReGLUMLP"}
+            if self._mlp_class in glu_mlp_classes:
+                raise ValueError(
+                    f"The config needs to set the `intermediate_size` for GLU-based MLP class '{self._mlp_class}'"
+                )
             self.intermediate_size = 4 * self.n_embd
 
     @property
@@ -93,6 +99,12 @@ class Config:
             from lit_gpt.rmsnorm import FusedRMSNorm
             return FusedRMSNorm
         return getattr(torch.nn, self._norm_class)
+
+    @property
+    def pos_encoding(self) -> dict:
+        """Get the positional encoding build_cache/apply functions."""
+        from lit_gpt.positional_encodings import get_pos_encoding
+        return get_pos_encoding(self._pos_encoding)
 
 
 ########################

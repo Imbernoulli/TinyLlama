@@ -50,7 +50,7 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         # GPT-NeoX       
         for name, p in module.named_parameters():
-            if (name == "proj.weight" and isinstance(module, LLaMAMLP)) or (name == "w3.weight" and isinstance(module, SwiGLU) or (name=="proj.weight" and isinstance(module, CausalSelfAttention))):  #if use xformer swiglu, fc2 layer will be renamed to w3
+            if (name == "proj.weight" and isinstance(module, (LLaMAMLP, GeluMLP, SiluMLP, ReluMLP, SwiGLUMLP, GeGLUMLP, ReGLUMLP, CausalSelfAttention))) or (name == "w3.weight" and isinstance(module, SwiGLU)):  #if use xformer swiglu, fc2 layer will be renamed to w3
                 nn.init.normal_(p, mean=0.0, std=1 / math.sqrt(self.config.n_embd)  /  n_layer)
         
 
@@ -117,11 +117,13 @@ class GPT(nn.Module):
         return cls(Config.from_name(name, **kwargs))
 
     def build_rope_cache(self, idx: torch.Tensor) -> RoPECache:
-        return build_rope_cache(
+        build_fn = self.config.pos_encoding["build_cache"]
+        return build_fn(
             seq_len=self.config.block_size,
             n_elem=int(self.config.rotary_percentage * self.config.head_size),
             dtype=torch.bfloat16,
             device=idx.device,
+            base=self.config.rope_base,
             condense_ratio=self.config.condense_ratio,
         )
 
@@ -193,6 +195,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         self.config = config
+        self._apply_pos_encoding = config.pos_encoding["apply"]
 
     def forward(
         self,
@@ -224,15 +227,14 @@ class CausalSelfAttention(nn.Module):
         #     v = v.expand(B, self.config.n_query_groups, q_per_kv, T, self.config.head_size)
 
         q = q.reshape(B,  T, -1, self.config.head_size)  # (B, T, nh_q, hs)
-        k = k.reshape(B,  T, -1, self.config.head_size)  
-        v = v.reshape(B,  T, -1, self.config.head_size)  
+        k = k.reshape(B,  T, -1, self.config.head_size)
+        v = v.reshape(B,  T, -1, self.config.head_size)
 
         cos, sin = rope
 
-        # apply rope in fp32 significanly stabalize training
+        # apply positional encoding to q, k (configurable via config._pos_encoding)
         # fused rope expect (batch_size, seqlen, nheads, headdim)
-        q = apply_rotary_emb_func(q, cos, sin, False, True)
-        k = apply_rotary_emb_func(k, cos, sin, False, True)
+        q, k = self._apply_pos_encoding(q, k, cos, sin)
         
         # n_elem = int(self.config.rotary_percentage * self.config.head_size)
     
@@ -316,6 +318,90 @@ class LLaMAMLP(nn.Module):
         # x = torch.nn.functional.silu(x_fc_1) * x_fc_2
         # return self.proj(x)
         return self.swiglu(x)
+
+
+class GeluMLP(nn.Module):
+    """MLP with GELU activation."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc(x)
+        x = torch.nn.functional.gelu(x)
+        return self.proj(x)
+
+
+class SiluMLP(nn.Module):
+    """MLP with SiLU (Swish) activation."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc(x)
+        x = torch.nn.functional.silu(x)
+        return self.proj(x)
+
+
+class ReluMLP(nn.Module):
+    """MLP with ReLU activation."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fc(x)
+        x = torch.nn.functional.relu(x)
+        return self.proj(x)
+
+
+class SwiGLUMLP(nn.Module):
+    """MLP with SwiGLU activation (SiLU-gated GLU)."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.fc_1(x)
+        up = self.fc_2(x)
+        x = torch.nn.functional.silu(gate) * up
+        return self.proj(x)
+
+
+class GeGLUMLP(nn.Module):
+    """MLP with GeGLU activation (GELU-gated GLU)."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.fc_1(x)
+        up = self.fc_2(x)
+        x = torch.nn.functional.gelu(gate) * up
+        return self.proj(x)
+
+
+class ReGLUMLP(nn.Module):
+    """MLP with ReGLU activation (ReLU-gated GLU)."""
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = self.fc_1(x)
+        up = self.fc_2(x)
+        x = torch.nn.functional.relu(gate) * up
+        return self.proj(x)
 
 
 def build_rope_cache(
