@@ -61,9 +61,9 @@ log_iter_interval = log_step_interval * gradient_accumulation_steps
 
 
 # Treat all dataset equally by their size. If you want to use a different weight for a dataset, add it to the list with the weight.
+# Updated to use FineWeb-Edu dataset (https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
 train_data_config = [
-    ("train_slim", 0.693584),
-    ("train_star", 0.306416),
+    ("train_fineweb", 1.0),
 ]
 
 val_data_config = [
@@ -77,7 +77,7 @@ wandb_logger = WandbLogger()
 
 def setup(
     devices: int = 8,
-    train_data_dir: Path = Path("data/redpajama_sample"),
+    train_data_dir: Path = Path("data/fineweb_edu_processed"),
     val_data_dir: Optional[Path] = None,
     precision: Optional[str] = None,
     tpu: bool = False,
@@ -324,7 +324,7 @@ def create_dataloader(
 
     if not datasets:
         raise RuntimeError(
-            f"No data found at {data_dir}. Make sure you ran prepare_redpajama.py to create the dataset."
+            f"No data found at {data_dir}. Make sure you ran prepare_fineweb.py to create the dataset."
         )
 
     weights = [weight for _, weight in data_config]
@@ -340,7 +340,7 @@ def create_dataloaders(
     batch_size: int,
     block_size: int,
     fabric,
-    train_data_dir: Path = Path("data/redpajama_sample"),
+    train_data_dir: Path = Path("data/fineweb_edu_processed"),
     val_data_dir: Optional[Path] = None,
     seed: int = 12345,
 ) -> Tuple[DataLoader, DataLoader]:
