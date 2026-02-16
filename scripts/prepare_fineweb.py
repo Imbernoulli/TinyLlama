@@ -84,6 +84,67 @@ def prepare_full(
     # builder.write_reminder()
 
 
+def prepare_from_hf(
+    tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    destination_path: Path = Path("data/fineweb_edu_processed"),
+    chunk_size: int = 2049 * 1024,
+    dataset_name: str = "sample-10BT",
+    max_samples: int = None,
+) -> None:
+    """
+    Prepare FineWeb-Edu dataset by streaming from Hugging Face.
+
+    Args:
+        tokenizer_path: Path to the tokenizer model
+        destination_path: Path to save the processed dataset
+        chunk_size: Size of each chunk
+        dataset_name: Dataset configuration (e.g., 'default', 'sample-10BT', 'CC-MAIN-2024-10')
+        max_samples: Maximum number of samples to process (None for all)
+    """
+    from datasets import load_dataset
+    import time
+
+    destination_path.mkdir(parents=True, exist_ok=True)
+    tokenizer = Tokenizer(tokenizer_path)
+
+    print(f"Loading FineWeb-Edu dataset (config: {dataset_name})...")
+
+    # Load dataset with streaming to avoid downloading everything
+    dataset = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name=dataset_name,
+        split="train",
+        streaming=True
+    )
+
+    builder = packed_dataset.PackedDatasetBuilder(
+        outdir=destination_path,
+        prefix=f"train_fineweb",
+        chunk_size=chunk_size,
+        sep_token=tokenizer.bos_id,
+        dtype="auto",
+        vocab_size=tokenizer.vocab_size,
+    )
+
+    start_time = time.time()
+    count = 0
+
+    print("Processing samples...")
+    for sample in tqdm(dataset):
+        text = sample['text']
+        text_ids = tokenizer.encode(text)
+        builder.add_array(np.array(text_ids, dtype=builder.dtype))
+
+        count += 1
+        if max_samples and count >= max_samples:
+            print(f"Reached max_samples limit: {max_samples}")
+            break
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Processed {count} samples in {elapsed_time:.2f} seconds")
+
+
 def prepare(
     source_path: Path = Path("data/fineweb-edu"),
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
@@ -93,7 +154,7 @@ def prepare(
     percentage: float = 1.0,
 ) -> None:
     """
-    Main function to prepare FineWeb-Edu dataset.
+    Main function to prepare FineWeb-Edu dataset from local files.
 
     Args:
         source_path: Path to the downloaded FineWeb-Edu dataset
@@ -123,11 +184,12 @@ def prepare(
 
     if not filenames:
         print(f"No files found at {source_path}")
-        print("Please download FineWeb-Edu dataset first using:")
-        print("huggingface-cli download HuggingFaceFW/fineweb-edu --repo-type dataset --local-dir data/fineweb-edu")
-        print("\nOr use the datasets library:")
-        print("from datasets import load_dataset")
-        print("dataset = load_dataset('HuggingFaceFW/fineweb-edu', split='train')")
+        print("Please use prepare_from_hf() instead to stream from Hugging Face:")
+        print("python scripts/prepare_fineweb.py prepare_from_hf \\")
+        print("  --tokenizer_path checkpoints/lit-llama/tokenizer.model \\")
+        print("  --destination_path data/fineweb_edu_processed \\")
+        print("  --dataset_name sample-10BT \\")
+        print("  --max_samples 100000")
         return
 
     filenames = filenames[:int(len(filenames) * percentage)]
